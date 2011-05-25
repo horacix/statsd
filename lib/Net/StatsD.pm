@@ -1,11 +1,10 @@
 package Net::StatsD;
-
-use warnings;
-use strict;
+use Moose;
+use IO::Socket;
 
 =head1 NAME
 
-Net::StatsD - The great new Net::StatsD!
+Net::StatsD - Sends statistics to etsy's stats daemon over UDP
 
 =head1 VERSION
 
@@ -18,34 +17,119 @@ our $VERSION = '0.01';
 
 =head1 SYNOPSIS
 
-Quick summary of what the module does.
-
-Perhaps a little code snippet.
+Sends statistics to the stats daemon over UDP
 
     use Net::StatsD;
 
-    my $foo = Net::StatsD->new();
-    ...
+    my $s = Net::StatsD->new();
+    $s->increment('logins');
+    $s->increment(['errors','exceptions.unhandled']));
 
-=head1 EXPORT
+    $s->timing('process.initialize', $initialize_ms);
 
-A list of functions that can be exported.  You can delete this section
-if you don't export anything, such as for a purely object-oriented module.
+=head1 METHODS
 
-=head1 SUBROUTINES/METHODS
+=head2 timing
 
-=head2 function1
+Log timing information
 
 =cut
 
-sub function1 {
+sub timing {
+    my ($self, $stat, $time, $sample_rate) = @_;
+
+    $sample_rate ||= 1;
+    $self->send({$stat => "$time|ms"}, $sample_rate);
 }
 
-=head2 function2
+=head2 increment
+
+Increments one or more stats counters
 
 =cut
 
-sub function2 {
+sub increment {
+    my ($self, $stats, $sample_rate) = @_;
+
+    $sample_rate ||= 1;
+    $self->update_stats($stats, 1, $sample_rate);
+}
+
+=head2 decrement
+
+Decrements one or more stats counters.
+
+=cut
+
+sub decrement {
+    my ($self, $stats, $sample_rate) = @_;
+
+    $sample_rate ||= 1;
+    $self->update_stats($stats, -1, $sample_rate);
+}
+
+=head2 update_stats
+
+Updates one or more stats counters by arbitrary amounts.
+
+=cut
+
+sub update_stats {
+    my ($self, $stats, $delta, $sample_rate) = @_;
+
+    $delta ||= 1;
+    $sample_rate ||= 1;
+    if (ref($stats) ne 'ARRAY') {
+        $stats = [$stats];
+    }
+    my %data = ();
+    foreach my $stat (@$stats) {
+        $data{$stat} = "$delta|c";
+    }
+
+    $self->send(\%data, $sample_rate);
+}
+
+=head2 send_data
+
+Squirt the metrics over UDP
+
+=cut
+
+sub send {
+    my ($self, $data, $sample_rate) = @_;
+
+    $sample_rate ||= 1;
+
+    # sampling
+    my %sampled_data = ();
+
+    if ($sample_rate < 1) {
+        while ( my ($stat, $value) = each(%$data) ) {
+            if ( rand() <= $sample_rate ) {
+                $sampled_data{$stat} = "$value|\@$sample_rate";
+            }
+        }
+    }
+    else {
+        %sampled_data = %$data;
+    }
+
+    # Failures in any of this should be silently ignored
+    eval {
+        my $host = $ENV{'STATSD_HOST'} || 'localhost';
+        my $port = $ENV{'STATSD_PORT'} || '1234';
+        my $fp = IO::Socket::INET->new(
+		    PeerAddr => $host,
+		    PeerPort => $port,
+		    Proto => 'udp',
+    	);
+    	return if (!$fp);
+    	while ( my ($stat, $value) = each(%sampled_data) ) {
+    	    print $fp "$stat:$value";
+    	}
+    	close $fp;
+    };
 }
 
 =head1 AUTHOR
@@ -104,3 +188,4 @@ This program is released under the following license: artistic
 =cut
 
 1; # End of Net::StatsD
+
